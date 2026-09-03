@@ -522,11 +522,25 @@ static void saida_vfmt_fd(int fd, const char *formato, va_lista args) {
             continue;
         }
         i++;
+        int e_longo = 0;
+        while (formato[i] == 'l') { e_longo++; i++; }
         switch (formato[i]) {
-            case 'd': case 'i': saida_int_fd(fd, va_prox(args, int)); break;
-            case 'u': saida_uint_fd(fd, va_prox(args, unsigned int), 10, 0); break;
-            case 'x': saida_uint_fd(fd, va_prox(args, unsigned int), 16, 0); break;
-            case 'X': saida_uint_fd(fd, va_prox(args, unsigned int), 16, 1); break;
+            case 'd': case 'i':
+                if (e_longo) saida_int_fd(fd, va_prox(args, int64_f));
+                else         saida_int_fd(fd, va_prox(args, int));
+                break;
+            case 'u':
+                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 10, 0);
+                else         saida_uint_fd(fd, va_prox(args, unsigned int), 10, 0);
+                break;
+            case 'x':
+                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 16, 0);
+                else         saida_uint_fd(fd, va_prox(args, unsigned int), 16, 0);
+                break;
+            case 'X':
+                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 16, 1);
+                else         saida_uint_fd(fd, va_prox(args, unsigned int), 16, 1);
+                break;
             case 's': saida_str_fd(fd, va_prox(args, const char *)); break;
             case 'c': saida_char_fd(fd, (char)va_prox(args, int)); break;
             case 'f': saida_float_fd(fd, va_prox(args, double), 6); break;
@@ -538,6 +552,7 @@ static void saida_vfmt_fd(int fd, const char *formato, va_lista args) {
             case '\0': i--; break;
             default:
                 saida_char_fd(fd, '%');
+                if (e_longo) for (int k = 0; k < e_longo; k++) saida_char_fd(fd, 'l');
                 saida_char_fd(fd, formato[i]);
                 break;
         }
@@ -634,11 +649,25 @@ static int txt_vfmt_buf(char *dest, unsigned long tam, const char *formato, va_l
             continue;
         }
         i++;
+        int e_longo = 0;
+        while (formato[i] == 'l') { e_longo++; i++; }
         switch (formato[i]) {
-            case 'd': case 'i': txt_buf_int(&b, va_prox(args, int)); break;
-            case 'u': txt_buf_uint(&b, va_prox(args, unsigned int), 10, 0); break;
-            case 'x': txt_buf_uint(&b, va_prox(args, unsigned int), 16, 0); break;
-            case 'X': txt_buf_uint(&b, va_prox(args, unsigned int), 16, 1); break;
+            case 'd': case 'i':
+                if (e_longo) txt_buf_int(&b, va_prox(args, int64_f));
+                else         txt_buf_int(&b, va_prox(args, int));
+                break;
+            case 'u':
+                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 10, 0);
+                else         txt_buf_uint(&b, va_prox(args, unsigned int), 10, 0);
+                break;
+            case 'x':
+                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 16, 0);
+                else         txt_buf_uint(&b, va_prox(args, unsigned int), 16, 0);
+                break;
+            case 'X':
+                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 16, 1);
+                else         txt_buf_uint(&b, va_prox(args, unsigned int), 16, 1);
+                break;
             case 's': txt_buf_str(&b, va_prox(args, const char *)); break;
             case 'c': txt_buf_char(&b, (char)va_prox(args, int)); break;
             case 'f': txt_buf_float(&b, va_prox(args, double), 6); break;
@@ -650,6 +679,7 @@ static int txt_vfmt_buf(char *dest, unsigned long tam, const char *formato, va_l
             case '\0': i--; break;
             default:
                 txt_buf_char(&b, '%');
+                if (e_longo) for (int k = 0; k < e_longo; k++) txt_buf_char(&b, 'l');
                 txt_buf_char(&b, formato[i]);
                 break;
         }
