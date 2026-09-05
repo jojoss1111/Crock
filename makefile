@@ -8,7 +8,9 @@ PREFIX     := /usr/local
 INCLUDEDIR := $(PREFIX)/include
 LIBOUTDIR  := $(PREFIX)/lib
 
-.PHONY: install clean
+SONAME := libcrock.so
+
+.PHONY: install clean so lua-install lua-clean
 
 install: $(LIBDIR)/crock.c $(LIBDIR)/crock.h
 	$(CC) $(CFLAGS) -c $(LIBDIR)/crock.c -o stdcrock.o
@@ -20,7 +22,7 @@ install: $(LIBDIR)/crock.c $(LIBDIR)/crock.h
 	rm -f $(LIBNAME)
 	@echo "Instalado. Agora e' so: gcc arquivo.c -lcrock -o programa"
 
-clean:
-	rm -f $(INCLUDEDIR)/crock.h $(LIBOUTDIR)/$(LIBNAME) stdcrock.o $(LIBNAME)
-	@echo "Lib removida do sistema."
 
+clean:
+	rm -f $(INCLUDEDIR)/crock.h $(LIBOUTDIR)/$(LIBNAME) stdcrock.o $(LIBNAME) $(SONAME)
+	@echo "Lib removida do sistema."

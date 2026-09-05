@@ -120,7 +120,7 @@ void saida_float_fd(int fd, double valor, int casas);
 void saida_fmt_fd(int fd, const char *formato, ...);
 
 #define saida_txt(...)    do { saida_fmt_fd(SAIDA_STDOUT, __VA_ARGS__); saida_flush(SAIDA_STDOUT); } while (0)
-#define saida_txt_ln(...) do { saida_fmt_fd(SAIDA_STDOUT, __VA_ARGS__); saida_char_fd(SAIDA_STDOUT, '\n'); } while (0)
+#define saida_txt_ln(...) do { saida_fmt_fd(SAIDA_STDOUT, __VA_ARGS__); saida_char_fd(SAIDA_STDOUT, '\n'); saida_flush(SAIDA_STDOUT); } while (0)
 #define saida_erro(...)   do { saida_fmt_fd(SAIDA_STDERR, __VA_ARGS__); saida_flush(SAIDA_STDERR); } while (0)
 
 // formata um texto num buffer (tipo snprintf)
@@ -137,15 +137,21 @@ unsigned long txt_tam(const char *str);
 int64_f txt_p_int(const char *str);
 // converte uma string pra float
 double txt_p_flt(const char *str);
-// limpa o buffer interno usado por txt_string
+// limpa o terminal
 void   txt_limpar(void);
 // formata e retorna uma string nova (usa buffer interno)
 char  *txt_string(const char *formato, ...);
 
 // lê um inteiro digitado pelo usuário
 int    entrada_int(void);
+int8_f entrada_int8(void);
+int16_f entrada_int16(void);
+int32_f entrada_int32(void);
+int64_f entrada_int64(void);
 // lê um float digitado pelo usuário
 double entrada_float(void);
+float  entrada_float32(void);
+double entrada_float64(void);
 // lê uma string digitada pelo usuário (aloca)
 char  *entrada_str(int cap);
 // lê uma string digitada pelo usuário num buffer existente
@@ -157,49 +163,8 @@ typedef char bool;
 #define true  1
 #endif
 
-// string dinâmica
-typedef struct {
-    char *dados;
-    size_t tamanho;
-    size_t capacidade;
-} string;
-
-// cria uma string a partir de um texto
-string string_criar(const char *inicial);
-// cria uma string vazia com capacidade inicial
-string string_criar_cap(size_t capacidade_inicial);
-// cria uma string nova já formatada
-string string_fmt_novo(const char *formato, ...);
-// adiciona um texto no final
-int    string_add(string *t, const char *s);
-// adiciona um caractere no final
-int    string_add_char(string *t, char c);
-// adiciona um texto formatado no final
-int    string_fmt(string *t, const char *formato, ...);
-// esvazia a string sem liberar a memória
-void   string_limpar(string *t);
-// libera a string
-void   string_liberar(string *t);
-// retorna o conteúdo como const char*
-const char *string_cstr(string *t);
-// compara a string com um texto
-int    string_igual(string *t, const char *s);
-// retorna o tamanho da string
-size_t string_tam(string *t);
-
-// divide a string por um delimitador, retorna um vetor de strings
-Vetor  string_split(string *t, const char *delimitador);
-// substitui todas as ocorrências de um alvo por outro texto
-int    string_replace(string *t, const char *alvo, const char *substituto);
-// remove espaços do início e do fim
-void   string_trim(string *t);
-
-#define s(txt) string_criar(txt)
-#define f(...) string_fmt_novo(__VA_ARGS__)
-#define p(t)   string_cstr(&(t))
-
 // lê o conteúdo inteiro de um arquivo
-string arquivo_ler_tudo(const char *caminho);
+char *arquivo_ler_tudo(const char *caminho);
 // escreve um conteúdo inteiro num arquivo
 int    arquivo_escrever_tudo(const char *caminho, const char *conteudo);
 // diz se um arquivo existe
@@ -235,6 +200,23 @@ double  timer_s(Timer *t);
 void    timer_dormir_ns(int64_f ns);
 // pausa a execução por um tempo em milissegundos
 void    timer_dormir_ms(int64_f ms);
+
+// timer com prazo definido, baseado no relógio monotônico
+typedef struct {
+    float   tempo_max_s;
+    int64_f inicio_ns;
+} Temporizador;
+
+// inicia um temporizador com um prazo (em segundos)
+void temporizador_iniciar(Temporizador *t, float tempo_max_s);
+// reinicia a contagem do temporizador (mantém o prazo configurado)
+void temporizador_resetar(Temporizador *t);
+// retorna o tempo decorrido em segundos
+float temporizador_decorrido(const Temporizador *t);
+// diz se o prazo já passou
+bool temporizador_passou(Temporizador *t);
+// diz se o prazo ainda não passou
+bool temporizador_nao_passou(Temporizador *t);
 
 // define a semente do gerador de números aleatórios
 void     random_seed(uint64_f semente);

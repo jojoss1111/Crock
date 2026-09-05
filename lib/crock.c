@@ -13,7 +13,6 @@ typedef __builtin_va_list va_lista;
 #define MMAP_FALHOU    ((void *)-1)
 
 extern void *mmap(void *addr, size_t tam, int prot, int flags, int fd, long offset);
-extern int   munmap(void *addr, size_t tam);
 
 static CrockErro crock_ultimo_erro = CROCK_OK;
 
@@ -55,19 +54,57 @@ struct block {
     unsigned int magia;
     struct block *next;
     struct block *prev;
+    struct block *free_next;
+    struct block *free_prev;
+    struct arena *dono;
 };
 
 #define CROCK_BLOCO_MAGIA_OK    0xC20C0001u
 #define CROCK_BLOCO_MAGIA_LIVRE 0xDEADC0DEu
 
+#define CROCK_SMALL_BIN_LIMIT 1024
+#define CROCK_SMALL_BINS (CROCK_SMALL_BIN_LIMIT / 8)
+#define CROCK_CLASSES 192
+
 struct arena {
     char *base;
     size_t tamanho;
-    struct block *lista;
-    struct arena *prox;
 };
 
-static struct arena *arenas = NULL;
+static struct block *free_bins[CROCK_CLASSES];
+
+static int free_bin(size_t tam) {
+    if (tam <= CROCK_SMALL_BIN_LIMIT) return (int)((tam + 7) / 8) - 1;
+
+#if defined(__GNUC__) || defined(__clang__)
+    int expoente = (int)(sizeof(size_t) * 8 - 1 - __builtin_clzl((unsigned long)tam));
+#else
+    int expoente = 0;
+    while (tam > 1) { tam >>= 1; expoente++; }
+#endif
+    int bin = CROCK_SMALL_BINS + expoente - 10;
+    if (bin >= CROCK_CLASSES) return CROCK_CLASSES - 1;
+    if (bin < CROCK_SMALL_BINS) return CROCK_SMALL_BINS;
+    return bin;
+}
+
+static void free_list_add(struct block *b) {
+    int bin = free_bin(b->size);
+    b->free_prev = NULL;
+    b->free_next = free_bins[bin];
+    if (free_bins[bin] != NULL) free_bins[bin]->free_prev = b;
+    free_bins[bin] = b;
+}
+
+static void free_list_remove(struct block *b) {
+    int bin = free_bin(b->size);
+    if (b->free_prev != NULL) b->free_prev->free_next = b->free_next;
+    else free_bins[bin] = b->free_next;
+    if (b->free_next != NULL) b->free_next->free_prev = b->free_prev;
+    b->free_next = NULL;
+    b->free_prev = NULL;
+}
+
 static int heap_initialized = 0;
 
 static struct arena *nova_arena(size_t tam_min) {
@@ -95,10 +132,11 @@ static struct arena *nova_arena(size_t tam_min) {
     b->magia = CROCK_BLOCO_MAGIA_LIVRE;
     b->next = NULL;
     b->prev = NULL;
+    b->dono = a;
+    b->free_next = NULL;
+    b->free_prev = NULL;
 
-    a->lista = b;
-    a->prox = arenas;
-    arenas = a;
+    free_list_add(b);
     return a;
 }
 
@@ -108,52 +146,48 @@ void init_heap(void) {
 }
 
 void *memoria_zerar(void *destino, size_t tam) {
-    unsigned char *p = (unsigned char *)destino;
-    for (size_t i = 0; i < tam; i++) p[i] = 0;
+    __builtin_memset(destino, 0, tam);
     return destino;
 }
 
 void *memoria_copia(void *destino, const void *origem, size_t tam) {
-    unsigned char *d = (unsigned char *)destino;
-    const unsigned char *s = (const unsigned char *)origem;
-    for (size_t i = 0; i < tam; i++) d[i] = s[i];
+    __builtin_memcpy(destino, origem, tam);
     return destino;
 }
 
 static void memoria_mover(void *destino, const void *origem, size_t tam) {
-    unsigned char *d = (unsigned char *)destino;
-    const unsigned char *s = (const unsigned char *)origem;
-
-    if (d == s || tam == 0) return;
-
-    if (d < s) {
-        for (size_t i = 0; i < tam; i++) d[i] = s[i];
-    } else {
-        for (size_t i = tam; i > 0; i--) d[i - 1] = s[i - 1];
-    }
+    __builtin_memmove(destino, origem, tam);
 }
 
-static struct block *malloc_na_arena(struct arena *a, size_t tam) {
-    struct block *atual = a->lista;
-    while (atual != NULL) {
-        if (atual->free && atual->size >= tam) {
-            if (atual->size >= tam + sizeof(struct block) + 8) {
-                struct block *novo = (struct block *)((char *)atual + sizeof(struct block) + tam);
-                novo->size = atual->size - tam - sizeof(struct block);
-                novo->free = 1;
-                novo->magia = CROCK_BLOCO_MAGIA_LIVRE;
-                novo->next = atual->next;
-                novo->prev = atual;
-                if (atual->next != NULL) atual->next->prev = novo;
+static struct block *malloc_de_bloco(struct arena *a, struct block *atual, size_t tam) {
+    free_list_remove(atual);
+    if (atual->size >= tam + sizeof(struct block) + 8) {
+        struct block *novo = (struct block *)((char *)atual + sizeof(struct block) + tam);
+        novo->size = atual->size - tam - sizeof(struct block);
+        novo->free = 1;
+        novo->magia = CROCK_BLOCO_MAGIA_LIVRE;
+        novo->next = atual->next;
+        novo->prev = atual;
+        novo->dono = a;
+        if (atual->next != NULL) atual->next->prev = novo;
 
-                atual->size = tam;
-                atual->next = novo;
-            }
-            atual->free = 0;
-            atual->magia = CROCK_BLOCO_MAGIA_OK;
-            return atual;
+        atual->size = tam;
+        atual->next = novo;
+        free_list_add(novo);
+    }
+    atual->free = 0;
+    atual->magia = CROCK_BLOCO_MAGIA_OK;
+    return atual;
+}
+
+static struct block *malloc_na_arena(size_t tam) {
+    for (int bin = free_bin(tam); bin < CROCK_CLASSES; bin++) {
+        struct block *atual = free_bins[bin];
+        while (atual != NULL) {
+            struct block *proximo = atual->free_next;
+            if (atual->size >= tam) return malloc_de_bloco(atual->dono, atual, tam);
+            atual = proximo;
         }
-        atual = atual->next;
     }
     return NULL;
 }
@@ -165,17 +199,14 @@ void *memoria_malloc(size_t tam) {
 
     tam = (tam + 7) & ~(size_t)7;
 
-    for (struct arena *a = arenas; a != NULL; a = a->prox) {
-        struct block *b = malloc_na_arena(a, tam);
-        if (b != NULL) return (void *)((char *)b + sizeof(struct block));
+    struct block *b = malloc_na_arena(tam);
+    if (b == NULL) {
+        struct arena *nova = nova_arena(tam);
+        if (nova == NULL) return crock_falha_ptr(CROCK_ERRO_MEMORIA);
+        b = malloc_na_arena(tam);
     }
-
-    struct arena *nova = nova_arena(tam);
-    if (nova == NULL) return crock_falha_ptr(CROCK_ERRO_MEMORIA);
-
-        struct block *b = malloc_na_arena(nova, tam);
     if (b == NULL) return crock_falha_ptr(CROCK_ERRO_MEMORIA);
-        return (void *)((char *)b + sizeof(struct block));
+    return (void *)((char *)b + sizeof(struct block));
 }
 
 void *memoria_calloc(size_t qtd, size_t tam_item) {
@@ -213,31 +244,20 @@ void memoria_free(void *ptr) {
     bloco->magia = CROCK_BLOCO_MAGIA_LIVRE;
 
     if (bloco->next != NULL && bloco->next->free) {
+        free_list_remove(bloco->next);
         bloco->size += sizeof(struct block) + bloco->next->size;
         bloco->next = bloco->next->next;
         if (bloco->next != NULL) bloco->next->prev = bloco;
     }
 
-    struct block *final = bloco;
     if (bloco->prev != NULL && bloco->prev->free) {
+        free_list_remove(bloco->prev);
         bloco->prev->size += sizeof(struct block) + bloco->size;
         bloco->prev->next = bloco->next;
         if (bloco->next != NULL) bloco->next->prev = bloco->prev;
-        final = bloco->prev;
-    }
-
-    if (final->prev == NULL && final->next == NULL && final->free &&
-        arenas != NULL && arenas->prox != NULL) {
-        struct arena *ant = NULL;
-        for (struct arena *a = arenas; a != NULL; a = a->prox) {
-            if (a->lista == final) {
-                if (ant == NULL) arenas = a->prox;
-                else ant->prox = a->prox;
-                munmap(a->base, a->tamanho);
-                break;
-            }
-            ant = a;
-        }
+        free_list_add(bloco->prev);
+    } else {
+        free_list_add(bloco);
     }
 }
 
@@ -252,6 +272,33 @@ void *memoria_realloc(void *ptr, size_t novo_tam) {
     }
     size_t alinhado = (novo_tam + 7) & ~(size_t)7;
     if (bloco->size >= alinhado) return ptr;
+
+    struct arena *a = bloco->dono;
+    if (bloco->next != NULL && bloco->next->free &&
+        bloco->size + sizeof(struct block) + bloco->next->size >= alinhado) {
+        struct block *prox = bloco->next;
+        free_list_remove(prox);
+        size_t total = bloco->size + sizeof(struct block) + prox->size;
+        bloco->next = prox->next;
+        if (bloco->next != NULL) bloco->next->prev = bloco;
+
+        if (total >= alinhado + sizeof(struct block) + 8) {
+            struct block *sobra = (struct block *)((char *)bloco + sizeof(struct block) + alinhado);
+            sobra->size = total - alinhado - sizeof(struct block);
+            sobra->free = 1;
+            sobra->magia = CROCK_BLOCO_MAGIA_LIVRE;
+            sobra->next = bloco->next;
+            sobra->prev = bloco;
+            sobra->dono = a;
+            if (bloco->next != NULL) bloco->next->prev = sobra;
+            bloco->next = sobra;
+            free_list_add(sobra);
+            bloco->size = alinhado;
+        } else {
+            bloco->size = total;
+        }
+        return ptr;
+    }
 
         void *novo = memoria_malloc(novo_tam);
     if (novo == NULL) return NULL;
@@ -322,14 +369,17 @@ static int vetor_crescer(Vetor *v) {
     return 1;
 }
 
+static int vetor_garantir_espaco(Vetor *v) {
+    if (v->tamanho < v->capacidade) return 0;
+    if (v->limite > 0 && v->tamanho >= v->limite) return crock_falha(CROCK_ERRO_LIMITE);
+    return vetor_crescer(v) ? 0 : -1;
+}
+
 int vetor_add(Vetor *v, void *valor) {
     CROCK_EXIGIR(v != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(valor != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(v->tam_elemento != 0, CROCK_ERRO_TAM_INVALIDO, -1);
-    if (v->tamanho >= v->capacidade) {
-        if (v->limite > 0 && v->tamanho >= v->limite) return crock_falha(CROCK_ERRO_LIMITE);
-        if (!vetor_crescer(v)) return -1;
-    }
+    if (vetor_garantir_espaco(v) != 0) return -1;
     char *destino = (char *)v->dados + ((size_t)v->tamanho * v->tam_elemento);
     memoria_copia(destino, valor, v->tam_elemento);
     v->tamanho++;
@@ -340,10 +390,7 @@ int vetor_add_str(Vetor *v, const char *texto) {
     CROCK_EXIGIR(v != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(texto != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(v->tam_elemento != 0, CROCK_ERRO_TAM_INVALIDO, -1);
-    if (v->tamanho >= v->capacidade) {
-        if (v->limite > 0 && v->tamanho >= v->limite) return crock_falha(CROCK_ERRO_LIMITE);
-        if (!vetor_crescer(v)) return -1;
-    }
+    if (vetor_garantir_espaco(v) != 0) return -1;
     char *destino = (char *)v->dados + ((size_t)v->tamanho * v->tam_elemento);
     memoria_zerar(destino, v->tam_elemento);
     txt_copia(destino, texto, v->tam_elemento - 1);
@@ -357,10 +404,7 @@ int vetor_inserir(Vetor *v, int32_f indice, void *valor) {
     CROCK_EXIGIR(valor != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(v->tam_elemento != 0, CROCK_ERRO_TAM_INVALIDO, -1);
     CROCK_EXIGIR(indice >= 0 && indice <= v->tamanho, CROCK_ERRO_INDICE, -1);
-    if (v->tamanho >= v->capacidade) {
-        if (v->limite > 0 && v->tamanho >= v->limite) return crock_falha(CROCK_ERRO_LIMITE);
-        if (!vetor_crescer(v)) return -1;
-    }
+    if (vetor_garantir_espaco(v) != 0) return -1;
 
     char *base = (char *)v->dados;
     char *origem = base + ((size_t)indice * v->tam_elemento);
@@ -419,7 +463,7 @@ void vetor_liberar(Vetor *v) {
     v->limite = 0;
 }
 
-#define SAIDA_BUF_TAM 256
+#define SAIDA_BUF_TAM 16384
 
 typedef struct {
     int fd;
@@ -437,8 +481,16 @@ static SaidaBuffer *saida_buffer_de(int fd) {
 void saida_flush(int fd) {
     SaidaBuffer *b = saida_buffer_de(fd);
     if (b->usado > 0) {
-        write(b->fd, b->dados, b->usado);
-        b->usado = 0;
+        unsigned long escrito = 0;
+        while (escrito < b->usado) {
+            long n = write(b->fd, b->dados + escrito, b->usado - escrito);
+            if (n <= 0) break;
+            escrito += (unsigned long)n;
+        }
+        if (escrito < b->usado) {
+            memoria_mover(b->dados, b->dados + escrito, b->usado - escrito);
+        }
+        b->usado -= escrito;
     }
 }
 
@@ -451,16 +503,44 @@ void saida_char_fd(int fd, char c) {
     SaidaBuffer *b = saida_buffer_de(fd);
     if (b->usado >= SAIDA_BUF_TAM) saida_flush(fd);
     b->dados[b->usado++] = c;
-    if (c == '\n') saida_flush(fd);
 }
 
 void saida_str_fd(int fd, const char *s) {
     if (!s) return;
-    while (*s) saida_char_fd(fd, *s++);
+    SaidaBuffer *b = saida_buffer_de(fd);
+    while (*s) {
+        unsigned long livre = SAIDA_BUF_TAM - b->usado;
+        if (livre == 0) { saida_flush(fd); continue; }
+        unsigned long n = 0;
+        while (n < livre && s[n] != '\0') n++;
+        memoria_copia(b->dados + b->usado, s, n);
+        b->usado += n;
+        s += n;
+    }
 }
 
-void saida_uint_fd(int fd, uint64_f valor, int base, int maiusculo) {
+typedef struct {
+    void *ctx;
+    void (*emite)(void *ctx, char c);
+    void (*emite_n)(void *ctx, const char *s, size_t n);
+} CrockEscritor;
 
+static void escritor_char(CrockEscritor *e, char c) { e->emite(e->ctx, c); }
+
+static void escritor_n(CrockEscritor *e, const char *s, size_t n) {
+    if (n == 0) return;
+    if (e->emite_n != NULL) e->emite_n(e->ctx, s, n);
+    else for (size_t i = 0; i < n; i++) e->emite(e->ctx, s[i]);
+}
+
+static void escritor_str(CrockEscritor *e, const char *s) {
+    if (!s) return;
+    const char *inicio = s;
+    while (*s) s++;
+    escritor_n(e, inicio, (size_t)(s - inicio));
+}
+
+static void escritor_uint(CrockEscritor *e, uint64_f valor, int base, int maiusculo) {
     char buffer[70];
     int i = 0;
     const char *digitos = maiusculo ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -474,23 +554,23 @@ void saida_uint_fd(int fd, uint64_f valor, int base, int maiusculo) {
             valor /= (uint64_f)base;
         }
     }
-    while (i > 0) saida_char_fd(fd, buffer[--i]);
+    while (i > 0) escritor_char(e, buffer[--i]);
 }
 
-void saida_int_fd(int fd, int64_f valor) {
+static void escritor_int(CrockEscritor *e, int64_f valor) {
     if (valor < 0) {
-        saida_char_fd(fd, '-');
+        escritor_char(e, '-');
         uint64_f abs_valor = (uint64_f)(~((uint64_f)valor)) + 1ULL;
-        saida_uint_fd(fd, abs_valor, 10, 0);
+        escritor_uint(e, abs_valor, 10, 0);
     } else {
-        saida_uint_fd(fd, (uint64_f)valor, 10, 0);
+        escritor_uint(e, (uint64_f)valor, 10, 0);
     }
 }
 
-void saida_float_fd(int fd, double valor, int casas) {
+static void escritor_float(CrockEscritor *e, double valor, int casas) {
     if (casas < 0) casas = 6;
     if (valor < 0) {
-        saida_char_fd(fd, '-');
+        escritor_char(e, '-');
         valor = -valor;
     }
 
@@ -500,25 +580,28 @@ void saida_float_fd(int fd, double valor, int casas) {
 
     long parte_inteira = (long)valor;
     double resto = valor - (double)parte_inteira;
-    saida_int_fd(fd, parte_inteira);
+    escritor_int(e, parte_inteira);
 
     if (casas > 0) {
-        saida_char_fd(fd, '.');
+        escritor_char(e, '.');
         for (int i = 0; i < casas; i++) {
             resto *= 10;
             int digito = (int)resto;
             if (digito > 9) digito = 9;
             if (digito < 0) digito = 0;
-            saida_char_fd(fd, (char)('0' + digito));
+            escritor_char(e, (char)('0' + digito));
             resto -= digito;
         }
     }
 }
 
-static void saida_vfmt_fd(int fd, const char *formato, va_lista args) {
+static void escritor_vfmt(CrockEscritor *e, const char *formato, va_lista args) {
     for (int i = 0; formato[i] != '\0'; i++) {
         if (formato[i] != '%') {
-            saida_char_fd(fd, formato[i]);
+            int inicio = i;
+            while (formato[i] != '\0' && formato[i] != '%') i++;
+            escritor_n(e, formato + inicio, (size_t)(i - inicio));
+            i--;
             continue;
         }
         i++;
@@ -526,37 +609,72 @@ static void saida_vfmt_fd(int fd, const char *formato, va_lista args) {
         while (formato[i] == 'l') { e_longo++; i++; }
         switch (formato[i]) {
             case 'd': case 'i':
-                if (e_longo) saida_int_fd(fd, va_prox(args, int64_f));
-                else         saida_int_fd(fd, va_prox(args, int));
+                if (e_longo) escritor_int(e, va_prox(args, int64_f));
+                else         escritor_int(e, va_prox(args, int));
                 break;
             case 'u':
-                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 10, 0);
-                else         saida_uint_fd(fd, va_prox(args, unsigned int), 10, 0);
+                if (e_longo) escritor_uint(e, va_prox(args, uint64_f), 10, 0);
+                else         escritor_uint(e, va_prox(args, unsigned int), 10, 0);
                 break;
             case 'x':
-                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 16, 0);
-                else         saida_uint_fd(fd, va_prox(args, unsigned int), 16, 0);
+                if (e_longo) escritor_uint(e, va_prox(args, uint64_f), 16, 0);
+                else         escritor_uint(e, va_prox(args, unsigned int), 16, 0);
                 break;
             case 'X':
-                if (e_longo) saida_uint_fd(fd, va_prox(args, uint64_f), 16, 1);
-                else         saida_uint_fd(fd, va_prox(args, unsigned int), 16, 1);
+                if (e_longo) escritor_uint(e, va_prox(args, uint64_f), 16, 1);
+                else         escritor_uint(e, va_prox(args, unsigned int), 16, 1);
                 break;
-            case 's': saida_str_fd(fd, va_prox(args, const char *)); break;
-            case 'c': saida_char_fd(fd, (char)va_prox(args, int)); break;
-            case 'f': saida_float_fd(fd, va_prox(args, double), 6); break;
+            case 's': escritor_str(e, va_prox(args, const char *)); break;
+            case 'c': escritor_char(e, (char)va_prox(args, int)); break;
+            case 'f': escritor_float(e, va_prox(args, double), 6); break;
             case 'p':
-                saida_str_fd(fd, "0x");
-                saida_uint_fd(fd, (unsigned long)va_prox(args, void *), 16, 0);
+                escritor_str(e, "0x");
+                escritor_uint(e, (unsigned long)va_prox(args, void *), 16, 0);
                 break;
-            case '%': saida_char_fd(fd, '%'); break;
+            case '%': escritor_char(e, '%'); break;
             case '\0': i--; break;
             default:
-                saida_char_fd(fd, '%');
-                if (e_longo) for (int k = 0; k < e_longo; k++) saida_char_fd(fd, 'l');
-                saida_char_fd(fd, formato[i]);
+                escritor_char(e, '%');
+                if (e_longo) for (int k = 0; k < e_longo; k++) escritor_char(e, 'l');
+                escritor_char(e, formato[i]);
                 break;
         }
     }
+}
+
+static void emite_fd(void *ctx, char c) { saida_char_fd(*(int *)ctx, c); }
+static void emite_fd_n(void *ctx, const char *s, size_t n) {
+    int fd = *(int *)ctx;
+    SaidaBuffer *b = saida_buffer_de(fd);
+    while (n > 0) {
+        unsigned long livre = SAIDA_BUF_TAM - b->usado;
+        if (livre == 0) { saida_flush(fd); continue; }
+        size_t parte = n < livre ? n : livre;
+        memoria_copia(b->dados + b->usado, s, parte);
+        b->usado += parte;
+        s += parte;
+        n -= parte;
+    }
+}
+
+void saida_uint_fd(int fd, uint64_f valor, int base, int maiusculo) {
+    CrockEscritor e = { &fd, emite_fd, emite_fd_n };
+    escritor_uint(&e, valor, base, maiusculo);
+}
+
+void saida_int_fd(int fd, int64_f valor) {
+    CrockEscritor e = { &fd, emite_fd, emite_fd_n };
+    escritor_int(&e, valor);
+}
+
+void saida_float_fd(int fd, double valor, int casas) {
+    CrockEscritor e = { &fd, emite_fd, emite_fd_n };
+    escritor_float(&e, valor, casas);
+}
+
+static void saida_vfmt_fd(int fd, const char *formato, va_lista args) {
+    CrockEscritor e = { &fd, emite_fd, emite_fd_n };
+    escritor_vfmt(&e, formato, args);
 }
 
 void saida_fmt_fd(int fd, const char *formato, ...) {
@@ -580,110 +698,21 @@ static void txt_buf_char(TxtBufEscrita *b, char c) {
     b->total++;
 }
 
-static void txt_buf_str(TxtBufEscrita *b, const char *s) {
-    if (!s) return;
-    while (*s) txt_buf_char(b, *s++);
-}
-
-static void txt_buf_uint(TxtBufEscrita *b, unsigned long valor, int base, int maiusculo) {
-
-    char buffer[70];
-    int i = 0;
-    const char *digitos = maiusculo ? "0123456789ABCDEF" : "0123456789abcdef";
-    if (base < 2 || base > 16) base = 10;
-
-    if (valor == 0) {
-        buffer[i++] = '0';
-    } else {
-        while (valor > 0) {
-            buffer[i++] = digitos[valor % (unsigned long)base];
-            valor /= (unsigned long)base;
-        }
-    }
-    while (i > 0) txt_buf_char(b, buffer[--i]);
-}
-
-static void txt_buf_int(TxtBufEscrita *b, long valor) {
-    if (valor < 0) {
-        txt_buf_char(b, '-');
-        unsigned long abs_valor = (unsigned long)(~((unsigned long)valor)) + 1UL;
-        txt_buf_uint(b, abs_valor, 10, 0);
-    } else {
-        txt_buf_uint(b, (unsigned long)valor, 10, 0);
-    }
-}
-
-static void txt_buf_float(TxtBufEscrita *b, double valor, int casas) {
-    if (casas < 0) casas = 6;
-    if (valor < 0) {
-        txt_buf_char(b, '-');
-        valor = -valor;
-    }
-    double ajuste = 0.5;
-    for (int i = 0; i < casas; i++) ajuste /= 10.0;
-    valor += ajuste;
-
-    long parte_inteira = (long)valor;
-    double resto = valor - (double)parte_inteira;
-    txt_buf_int(b, parte_inteira);
-
-    if (casas > 0) {
-        txt_buf_char(b, '.');
-        for (int i = 0; i < casas; i++) {
-            resto *= 10;
-            int digito = (int)resto;
-            if (digito > 9) digito = 9;
-            if (digito < 0) digito = 0;
-            txt_buf_char(b, (char)('0' + digito));
-            resto -= digito;
-        }
-    }
+static void emite_buf(void *ctx, char c) { txt_buf_char((TxtBufEscrita *)ctx, c); }
+static void emite_buf_n(void *ctx, const char *s, size_t n) {
+    TxtBufEscrita *b = (TxtBufEscrita *)ctx;
+    unsigned long disponivel = (b->dest != NULL && b->capacidade > b->usado)
+        ? b->capacidade - b->usado - 1 : 0;
+    unsigned long copiar = (n < disponivel) ? (unsigned long)n : disponivel;
+    if (copiar > 0) memoria_copia(b->dest + b->usado, s, copiar);
+    b->usado += copiar;
+    b->total += n;
 }
 
 static int txt_vfmt_buf(char *dest, unsigned long tam, const char *formato, va_lista args) {
     TxtBufEscrita b = { dest, tam, 0, 0 };
-
-    for (int i = 0; formato[i] != '\0'; i++) {
-        if (formato[i] != '%') {
-            txt_buf_char(&b, formato[i]);
-            continue;
-        }
-        i++;
-        int e_longo = 0;
-        while (formato[i] == 'l') { e_longo++; i++; }
-        switch (formato[i]) {
-            case 'd': case 'i':
-                if (e_longo) txt_buf_int(&b, va_prox(args, int64_f));
-                else         txt_buf_int(&b, va_prox(args, int));
-                break;
-            case 'u':
-                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 10, 0);
-                else         txt_buf_uint(&b, va_prox(args, unsigned int), 10, 0);
-                break;
-            case 'x':
-                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 16, 0);
-                else         txt_buf_uint(&b, va_prox(args, unsigned int), 16, 0);
-                break;
-            case 'X':
-                if (e_longo) txt_buf_uint(&b, va_prox(args, uint64_f), 16, 1);
-                else         txt_buf_uint(&b, va_prox(args, unsigned int), 16, 1);
-                break;
-            case 's': txt_buf_str(&b, va_prox(args, const char *)); break;
-            case 'c': txt_buf_char(&b, (char)va_prox(args, int)); break;
-            case 'f': txt_buf_float(&b, va_prox(args, double), 6); break;
-            case 'p':
-                txt_buf_str(&b, "0x");
-                txt_buf_uint(&b, (unsigned long)va_prox(args, void *), 16, 0);
-                break;
-            case '%': txt_buf_char(&b, '%'); break;
-            case '\0': i--; break;
-            default:
-                txt_buf_char(&b, '%');
-                if (e_longo) for (int k = 0; k < e_longo; k++) txt_buf_char(&b, 'l');
-                txt_buf_char(&b, formato[i]);
-                break;
-        }
-    }
+    CrockEscritor e = { &b, emite_buf, emite_buf_n };
+    escritor_vfmt(&e, formato, args);
 
     if (dest != NULL && tam > 0) {
         unsigned long pos = (b.usado < tam - 1) ? b.usado : tam - 1;
@@ -729,18 +758,27 @@ unsigned long txt_tam(const char *str) {
 }
 
 int64_f txt_p_int(const char *str) {
-    int i = 0;
-    int64_f sinal = 1, resultado = 0;
+    int i = 0, negativo = 0;
+    uint64_f resultado = 0;
+    const uint64_f maximo = (uint64_f)(((uint64_f)-1) >> 1);
+    const uint64_f limite = maximo + 1;
 
     while (str[i] == ' ' || str[i] == '\t' || str[i] == '\n') i++;
-    if (str[i] == '-') { sinal = -1; i++; }
-    else if (str[i] == '+') { i++; }
+    if (str[i] == '-') { negativo = 1; i++; }
+    else if (str[i] == '+') i++;
 
     while (str[i] >= '0' && str[i] <= '9') {
-        resultado = resultado * 10 + (str[i] - '0');
+        uint64_f digito = (uint64_f)(str[i] - '0');
+        uint64_f teto = negativo ? limite : maximo;
+        if (resultado > (teto - digito) / 10) return negativo ? (int64_f)(-limite) : (int64_f)maximo;
+        resultado = resultado * 10 + digito;
         i++;
     }
-    return resultado * sinal;
+    if (negativo) {
+        if (resultado == limite) return (int64_f)(-limite);
+        return -(int64_f)resultado;
+    }
+    return (int64_f)resultado;
 }
 
 double txt_p_flt(const char *str) {
@@ -751,7 +789,9 @@ double txt_p_flt(const char *str) {
     if (str[i] == '-') { sinal = -1.0; i++; }
     else if (str[i] == '+') { i++; }
 
+    const double maximo = 1.7976931348623157e308;
     while (str[i] >= '0' && str[i] <= '9') {
+        if (resultado > maximo / 10.0) return sinal < 0 ? -maximo : maximo;
         resultado = resultado * 10.0 + (str[i] - '0');
         i++;
     }
@@ -759,6 +799,7 @@ double txt_p_flt(const char *str) {
         i++;
         double fracao = 0.1;
         while (str[i] >= '0' && str[i] <= '9') {
+            if (resultado > maximo - (str[i] - '0') * fracao) return sinal < 0 ? -maximo : maximo;
             resultado += (str[i] - '0') * fracao;
             fracao *= 0.1;
             i++;
@@ -835,257 +876,57 @@ void entrada_str_em(char *destino, int tam) {
     memoria_free(temp);
 }
 
-int entrada_int(void) {
-    char buffer[100];
+static void entrada_ler_num(char *buffer, int cap) {
     int i = 0, c;
     while ((c = entrada_getchar()) != '\n' && c != -1) {
-        if (i < (int)sizeof(buffer) - 1) buffer[i++] = (char)c;
-
+        if (i < cap - 1) buffer[i++] = (char)c;
     }
     buffer[i] = '\0';
+}
+
+int64_f entrada_int64(void) {
+    char buffer[100];
+    entrada_ler_num(buffer, (int)sizeof(buffer));
     return txt_p_int(buffer);
+}
+
+int entrada_int(void) { return (int)entrada_int64(); }
+
+static int64_f entrada_int_limite(int64_f minimo, int64_f maximo) {
+    int64_f valor = entrada_int64();
+    if (valor < minimo) return minimo;
+    if (valor > maximo) return maximo;
+    return valor;
+}
+
+int8_f entrada_int8(void) {
+    return (int8_f)entrada_int_limite(-128, 127);
+}
+
+int16_f entrada_int16(void) {
+    return (int16_f)entrada_int_limite(-32768, 32767);
+}
+
+int32_f entrada_int32(void) {
+    return (int32_f)entrada_int_limite(-2147483647LL - 1, 2147483647LL);
 }
 
 double entrada_float(void) {
     char buffer[100];
-    int i = 0, c;
-    while ((c = entrada_getchar()) != '\n' && c != -1) {
-        if (i < (int)sizeof(buffer) - 1) buffer[i++] = (char)c;
-    }
-    buffer[i] = '\0';
+    entrada_ler_num(buffer, (int)sizeof(buffer));
     return txt_p_flt(buffer);
 }
 
-string string_criar_cap(size_t capacidade_inicial) {
-    string t;
-    if (capacidade_inicial < 8) capacidade_inicial = 8;
-    t.dados = (char *)memoria_malloc(capacidade_inicial);
-    t.tamanho = 0;
-    t.capacidade = capacidade_inicial;
-    if (t.dados) t.dados[0] = '\0';
-    return t;
+float entrada_float32(void) {
+    double valor = entrada_float();
+    const double maximo = 3.4028234663852886e38;
+    if (valor > maximo) return (float)maximo;
+    if (valor < -maximo) return (float)-maximo;
+    return (float)valor;
 }
 
-string string_criar(const char *inicial) {
-    size_t tam = inicial ? txt_tam(inicial) : 0;
-    string t = string_criar_cap(tam + 1);
-    if (inicial && t.dados) {
-        txt_copia(t.dados, inicial, tam + 1);
-        t.tamanho = tam;
-    }
-    return t;
-}
-
-string string_fmt_novo(const char *formato, ...) {
-    va_lista args, args_copia;
-    va_inicio(args, formato);
-    va_dup(args_copia, args);
-
-    int tam = txt_vfmt_buf(NULL, 0, formato, args_copia);
-    va_fim(args_copia);
-    if (tam < 0) { va_fim(args); return string_criar(""); }
-
-    string t = string_criar_cap((size_t)tam + 1);
-    if (t.dados) {
-        txt_vfmt_buf(t.dados, (unsigned long)tam + 1, formato, args);
-        t.tamanho = (size_t)tam;
-    }
-    va_fim(args);
-    return t;
-}
-
-static int string_garantir_cap(string *t, size_t cap_minima) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    if (cap_minima <= t->capacidade) return 1;
-
-    size_t cap_dobrada = t->capacidade * 2;
-    size_t nova_cap = (cap_dobrada > cap_minima) ? cap_dobrada : cap_minima;
-
-    char *novo = (char *)memoria_realloc(t->dados, nova_cap);
-    if (!novo) return 0;
-    t->dados = novo;
-    t->capacidade = nova_cap;
-    return 1;
-}
-
-int string_add(string *t, const char *s) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    if (!s) return 0;
-    size_t tam_s = txt_tam(s);
-    if (tam_s == 0) return 1;
-
-    if (!string_garantir_cap(t, t->tamanho + tam_s + 1)) return 0;
-
-    memoria_copia(t->dados + t->tamanho, s, tam_s + 1);
-    t->tamanho += tam_s;
-    return 1;
-}
-
-int string_add_char(string *t, char c) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    char buf[2] = { c, '\0' };
-    return string_add(t, buf);
-}
-
-static int string_add_n(string *t, const char *s, size_t n) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    CROCK_EXIGIR(s != NULL, CROCK_ERRO_NULO, 0);
-    if (n == 0) return 1;
-    if (!string_garantir_cap(t, t->tamanho + n + 1)) return 0;
-
-    memoria_copia(t->dados + t->tamanho, s, n);
-    t->tamanho += n;
-    t->dados[t->tamanho] = '\0';
-    return 1;
-}
-
-int string_fmt(string *t, const char *formato, ...) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    CROCK_EXIGIR(formato != NULL, CROCK_ERRO_NULO, 0);
-    va_lista args, args_copia;
-    va_inicio(args, formato);
-    va_dup(args_copia, args);
-
-    int tam = txt_vfmt_buf(NULL, 0, formato, args_copia);
-    va_fim(args_copia);
-    if (tam < 0) { va_fim(args); return 0; }
-
-    if (!string_garantir_cap(t, t->tamanho + (size_t)tam + 1)) { va_fim(args); return 0; }
-
-    txt_vfmt_buf(t->dados + t->tamanho, (unsigned long)tam + 1, formato, args);
-    va_fim(args);
-    t->tamanho += (size_t)tam;
-    return 1;
-}
-
-void string_limpar(string *t) {
-    if (t == NULL) { crock_falha(CROCK_ERRO_NULO); return; }
-    t->tamanho = 0;
-    if (t->dados) t->dados[0] = '\0';
-}
-
-void string_liberar(string *t) {
-    if (t == NULL) { crock_falha(CROCK_ERRO_NULO); return; }
-    memoria_free(t->dados);
-    t->dados = NULL;
-    t->tamanho = 0;
-    t->capacidade = 0;
-}
-
-const char *string_cstr(string *t) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, "");
-    return t->dados ? t->dados : "";
-}
-
-int string_igual(string *t, const char *s) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    CROCK_EXIGIR(s != NULL, CROCK_ERRO_NULO, 0);
-    return txt_comp(string_cstr(t), s) == 0;
-}
-
-size_t string_tam(string *t) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    return t->tamanho;
-}
-
-static const char *txt_buscar(const char *str, const char *alvo) {
-    if (*alvo == '\0') return NULL;
-    for (const char *p = str; *p != '\0'; p++) {
-        const char *a = p;
-        const char *b = alvo;
-        while (*b != '\0' && *a == *b) { a++; b++; }
-        if (*b == '\0') return p;
-    }
-    return NULL;
-}
-
-static int txt_e_espaco(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
-}
-
-Vetor string_split(string *t, const char *delimitador) {
-    Vetor partes = vetor_criar(sizeof(string), 4);
-    if (t == NULL) { crock_falha(CROCK_ERRO_NULO); return partes; }
-    const char *origem = string_cstr(t);
-
-    if (delimitador == NULL || *delimitador == '\0') {
-        string copia = string_criar(origem);
-        vetor_add(&partes, &copia);
-        return partes;
-    }
-
-    size_t tam_delim = txt_tam(delimitador);
-    const char *inicio = origem;
-    const char *pos;
-
-    while ((pos = txt_buscar(inicio, delimitador)) != NULL) {
-        size_t tam_pedaco = (size_t)(pos - inicio);
-        string pedaco = string_criar_cap(tam_pedaco + 1);
-        if (pedaco.dados != NULL) string_add_n(&pedaco, inicio, tam_pedaco);
-        vetor_add(&partes, &pedaco);
-        inicio = pos + tam_delim;
-    }
-
-    string ultimo = string_criar(inicio);
-    vetor_add(&partes, &ultimo);
-
-    return partes;
-}
-
-int string_replace(string *t, const char *alvo, const char *substituto) {
-    CROCK_EXIGIR(t != NULL, CROCK_ERRO_NULO, 0);
-    if (alvo == NULL || *alvo == '\0') return 0;
-    if (substituto == NULL) substituto = "";
-
-    const char *origem = string_cstr(t);
-    size_t tam_alvo = txt_tam(alvo);
-
-    int ocorrencias = 0;
-    {
-        const char *p = origem;
-        while ((p = txt_buscar(p, alvo)) != NULL) { ocorrencias++; p += tam_alvo; }
-    }
-    if (ocorrencias == 0) return 0;
-
-    size_t tam_sub = txt_tam(substituto);
-    size_t cresce_por_troca = (tam_sub > tam_alvo) ? (tam_sub - tam_alvo) : 0;
-    string resultado = string_criar_cap(t->tamanho + (size_t)ocorrencias * cresce_por_troca + 1);
-    if (resultado.dados == NULL) return 0;
-
-    const char *inicio = origem;
-    const char *pos;
-    while ((pos = txt_buscar(inicio, alvo)) != NULL) {
-        size_t tam_pedaco = (size_t)(pos - inicio);
-        if (!string_add_n(&resultado, inicio, tam_pedaco) || !string_add(&resultado, substituto)) {
-            string_liberar(&resultado);
-            return 0;
-        }
-        inicio = pos + tam_alvo;
-    }
-    if (!string_add(&resultado, inicio)) {
-        string_liberar(&resultado);
-        return 0;
-    }
-
-    string_liberar(t);
-    *t = resultado;
-    return ocorrencias;
-}
-
-void string_trim(string *t) {
-    if (t == NULL) { crock_falha(CROCK_ERRO_NULO); return; }
-    if (t->dados == NULL || t->tamanho == 0) return;
-
-    size_t inicio = 0;
-    while (inicio < t->tamanho && txt_e_espaco(t->dados[inicio])) inicio++;
-
-    size_t fim = t->tamanho;
-    while (fim > inicio && txt_e_espaco(t->dados[fim - 1])) fim--;
-
-    size_t novo_tam = fim - inicio;
-    if (inicio > 0 && novo_tam > 0) memoria_mover(t->dados, t->dados + inicio, novo_tam);
-    t->dados[novo_tam] = '\0';
-    t->tamanho = novo_tam;
+double entrada_float64(void) {
+    return entrada_float();
 }
 
 extern int  open(const char *caminho, int flags, ...);
@@ -1096,20 +937,42 @@ extern int  close(int fd);
 #define ARQ_O_CREAT  0100
 #define ARQ_O_TRUNC  01000
 
-string arquivo_ler_tudo(const char *caminho) {
-    string conteudo = string_criar_cap(256);
-    if (caminho == NULL) { crock_falha(CROCK_ERRO_NULO); return conteudo; }
+char *arquivo_ler_tudo(const char *caminho) {
+    if (caminho == NULL) { crock_falha(CROCK_ERRO_NULO); return NULL; }
+    size_t capacidade = 4096;
+    size_t tamanho = 0;
+    char *conteudo = (char *)memoria_malloc(capacidade);
+    if (conteudo == NULL) return NULL;
 
     int fd = open(caminho, ARQ_O_RDONLY);
-    if (fd < 0) { crock_falha(CROCK_ERRO_ARQUIVO); return conteudo; }
+    if (fd < 0) { memoria_free(conteudo); crock_falha(CROCK_ERRO_ARQUIVO); return NULL; }
 
-        char buf[4096];
+    char buf[4096];
     long n;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
-        string_add_n(&conteudo, buf, (size_t)n);
+        size_t lido = (size_t)n;
+        if (lido > (size_t)-1 - tamanho - 1) {
+            close(fd); memoria_free(conteudo); crock_falha(CROCK_ERRO_TAM_INVALIDO); return NULL;
+        }
+        size_t necessario = tamanho + lido + 1;
+        if (necessario > capacidade) {
+            size_t nova = capacidade;
+            while (nova < necessario) {
+                if (nova > (size_t)-1 / 2) { nova = necessario; break; }
+                nova *= 2;
+            }
+            char *novo = (char *)memoria_realloc(conteudo, nova);
+            if (novo == NULL) { close(fd); memoria_free(conteudo); return NULL; }
+            conteudo = novo;
+            capacidade = nova;
+        }
+        memoria_copia(conteudo + tamanho, buf, lido);
+        tamanho += lido;
     }
 
     close(fd);
+    if (n < 0) { memoria_free(conteudo); crock_falha(CROCK_ERRO_ARQUIVO); return NULL; }
+    conteudo[tamanho] = '\0';
     return conteudo;
 }
 
@@ -1140,8 +1003,27 @@ int arquivo_existe(const char *caminho) {
 }
 
 static const char MEMORIA_SALVA_MAGIA[4] = { 'C', 'R', 'S', 'V' };
+#define MEMORIA_IO_BUF_TAM 16384
 
-static int memoria_escreve_bin(int fd, const void *dados, size_t tam) {
+typedef struct {
+    int fd;
+    size_t usado;
+    char dados[MEMORIA_IO_BUF_TAM];
+} MemoriaWriter;
+
+typedef struct {
+    int fd;
+    size_t pos;
+    size_t tamanho;
+    char dados[MEMORIA_IO_BUF_TAM];
+} MemoriaReader;
+
+static MemoriaWriter memoria_writer;
+static MemoriaReader memoria_reader;
+static int memoria_writer_ativo = 0;
+static int memoria_reader_ativo = 0;
+
+static int memoria_escreve_bruto(int fd, const void *dados, size_t tam) {
     const char *p = (const char *)dados;
     size_t escrito = 0;
     while (escrito < tam) {
@@ -1152,13 +1034,57 @@ static int memoria_escreve_bin(int fd, const void *dados, size_t tam) {
     return 1;
 }
 
+static int memoria_flush_writer(void) {
+    if (!memoria_writer_ativo || memoria_writer.usado == 0) return 1;
+    if (!memoria_escreve_bruto(memoria_writer.fd, memoria_writer.dados, memoria_writer.usado)) return 0;
+    memoria_writer.usado = 0;
+    return 1;
+}
+
+static int memoria_escreve_bin(int fd, const void *dados, size_t tam) {
+    if (!memoria_writer_ativo || memoria_writer.fd != fd) return memoria_escreve_bruto(fd, dados, tam);
+    const char *p = (const char *)dados;
+    while (tam > 0) {
+        size_t livre = MEMORIA_IO_BUF_TAM - memoria_writer.usado;
+        if (livre == 0 && !memoria_flush_writer()) return 0;
+        livre = MEMORIA_IO_BUF_TAM - memoria_writer.usado;
+        if (tam >= MEMORIA_IO_BUF_TAM && memoria_writer.usado == 0) {
+            return memoria_escreve_bruto(fd, p, tam);
+        }
+        size_t parte = tam < livre ? tam : livre;
+        memoria_copia(memoria_writer.dados + memoria_writer.usado, p, parte);
+        memoria_writer.usado += parte;
+        p += parte;
+        tam -= parte;
+    }
+    return 1;
+}
+
 static int memoria_le_bin(int fd, void *dest, size_t tam) {
-    char *p = (char *)dest;
-    size_t lido = 0;
-    while (lido < tam) {
-        long n = read(fd, p + lido, tam - lido);
-        if (n <= 0) return 0;
+    if (!memoria_reader_ativo || memoria_reader.fd != fd) {
+        char *p = (char *)dest;
+        size_t lido = 0;
+        while (lido < tam) {
+            long n = read(fd, p + lido, tam - lido);
+            if (n <= 0) return 0;
             lido += (size_t)n;
+        }
+        return 1;
+    }
+    char *p = (char *)dest;
+    while (tam > 0) {
+        if (memoria_reader.pos == memoria_reader.tamanho) {
+            long n = read(fd, memoria_reader.dados, MEMORIA_IO_BUF_TAM);
+            if (n <= 0) return 0;
+            memoria_reader.pos = 0;
+            memoria_reader.tamanho = (size_t)n;
+        }
+        size_t disponivel = memoria_reader.tamanho - memoria_reader.pos;
+        size_t parte = tam < disponivel ? tam : disponivel;
+        memoria_copia(p, memoria_reader.dados + memoria_reader.pos, parte);
+        memoria_reader.pos += parte;
+        p += parte;
+        tam -= parte;
     }
     return 1;
 }
@@ -1168,6 +1094,9 @@ int memoria_salva(const char *caminho, const char *formato, ...) {
     CROCK_EXIGIR(formato != NULL, CROCK_ERRO_NULO, -1);
     int fd = open(caminho, ARQ_O_WRONLY | ARQ_O_CREAT | ARQ_O_TRUNC, 0644);
     if (fd < 0) return crock_falha(CROCK_ERRO_ARQUIVO);
+    memoria_writer.fd = fd;
+    memoria_writer.usado = 0;
+    memoria_writer_ativo = 1;
 
     int ok = memoria_escreve_bin(fd, MEMORIA_SALVA_MAGIA, sizeof(MEMORIA_SALVA_MAGIA));
 
@@ -1227,6 +1156,8 @@ int memoria_salva(const char *caminho, const char *formato, ...) {
     }
 
     va_fim(args);
+    ok = ok && memoria_flush_writer();
+    memoria_writer_ativo = 0;
     close(fd);
     return ok ? 0 : -1;
 }
@@ -1236,24 +1167,29 @@ int memoria_load(const char *caminho, const char *formato, ...) {
     CROCK_EXIGIR(formato != NULL, CROCK_ERRO_NULO, -1);
     int fd = open(caminho, ARQ_O_RDONLY);
     if (fd < 0) return crock_falha(CROCK_ERRO_ARQUIVO);
+    memoria_reader.fd = fd;
+    memoria_reader.pos = 0;
+    memoria_reader.tamanho = 0;
+    memoria_reader_ativo = 1;
 
     char magia[4];
     if (!memoria_le_bin(fd, magia, sizeof(magia)) ||
         magia[0] != MEMORIA_SALVA_MAGIA[0] || magia[1] != MEMORIA_SALVA_MAGIA[1] ||
         magia[2] != MEMORIA_SALVA_MAGIA[2] || magia[3] != MEMORIA_SALVA_MAGIA[3]) {
+        memoria_reader_ativo = 0;
         close(fd);
     return -1;
         }
 
         uint32_f tam_formato_salvo = 0;
-        if (!memoria_le_bin(fd, &tam_formato_salvo, sizeof(tam_formato_salvo))) { close(fd); return -1; }
+        if (!memoria_le_bin(fd, &tam_formato_salvo, sizeof(tam_formato_salvo))) { memoria_reader_ativo = 0; close(fd); return -1; }
 
         char formato_salvo[64];
-        if (tam_formato_salvo >= sizeof(formato_salvo)) { close(fd); return -1; }
-        if (!memoria_le_bin(fd, formato_salvo, tam_formato_salvo)) { close(fd); return -1; }
+        if (tam_formato_salvo >= sizeof(formato_salvo)) { memoria_reader_ativo = 0; close(fd); return -1; }
+        if (!memoria_le_bin(fd, formato_salvo, tam_formato_salvo)) { memoria_reader_ativo = 0; close(fd); return -1; }
         formato_salvo[tam_formato_salvo] = '\0';
 
-        if (txt_comp(formato_salvo, formato) != 0) { close(fd); return crock_falha(CROCK_ERRO_FORMATO); }
+        if (txt_comp(formato_salvo, formato) != 0) { memoria_reader_ativo = 0; close(fd); return crock_falha(CROCK_ERRO_FORMATO); }
 
             va_lista args;
             va_inicio(args, formato);
@@ -1323,6 +1259,7 @@ int memoria_load(const char *caminho, const char *formato, ...) {
             }
 
             va_fim(args);
+            memoria_reader_ativo = 0;
             close(fd);
             return ok ? 0 : -1;
 }
@@ -1400,6 +1337,28 @@ static uint64_f crock_rand_proximo(void) {
     x ^= x << 17;
     crock_rand_estado = x;
     return x * 0x2545F4914F6CDD1DULL;
+}
+
+void temporizador_iniciar(Temporizador *t, float tempo_max_s) {
+    t->tempo_max_s = tempo_max_s;
+    t->inicio_ns   = timer_relogio_ns();
+}
+
+void temporizador_resetar(Temporizador *t) {
+    t->inicio_ns = timer_relogio_ns();
+}
+
+float temporizador_decorrido(const Temporizador *t) {
+    int64_f agora = timer_relogio_ns();
+    return (float)(agora - t->inicio_ns) / 1e9f;
+}
+
+bool temporizador_passou(Temporizador *t) {
+    return temporizador_decorrido(t) >= t->tempo_max_s;
+}
+
+bool temporizador_nao_passou(Temporizador *t) {
+    return !temporizador_passou(t);
 }
 
 void random_seed(uint64_f semente) {
