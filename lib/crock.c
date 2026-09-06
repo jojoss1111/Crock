@@ -6,13 +6,14 @@ typedef __builtin_va_list va_lista;
 #define va_prox(v, tipo)     __builtin_va_arg(v, tipo)
 #define va_dup(d, s)         __builtin_va_copy(d, s)
 
-#define PROT_READ      0x1
-#define PROT_WRITE     0x2
-#define MAP_PRIVATE    0x02
-#define MAP_ANONYMOUS  0x20
-#define MMAP_FALHOU    ((void *)-1)
-
-extern void *mmap(void *addr, size_t tam, int prot, int flags, int fd, long offset);
+extern void    *crock_plat_memoria_reservar(size_t tam);
+extern int64_f  crock_plat_escrever(int fd, const void *buf, size_t tam);
+extern int64_f  crock_plat_ler(int fd, void *buf, size_t tam);
+extern int      crock_plat_abrir_leitura(const char *caminho);
+extern int      crock_plat_abrir_escrita(const char *caminho);
+extern void     crock_plat_fechar(int fd);
+extern int64_f  crock_plat_relogio_ns(void);
+extern void     crock_plat_dormir_ns(int64_f ns);
 
 static CrockErro crock_ultimo_erro = CROCK_OK;
 
@@ -118,9 +119,8 @@ static struct arena *nova_arena(size_t tam_min) {
         tam *= 2;
     }
 
-        void *mem = mmap(NULL, tam, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (mem == MMAP_FALHOU || mem == NULL) return NULL;
+        void *mem = crock_plat_memoria_reservar(tam);
+        if (mem == NULL) return NULL;
 
         struct arena *a = (struct arena *)mem;
     a->base = (char *)mem;
@@ -483,7 +483,7 @@ void saida_flush(int fd) {
     if (b->usado > 0) {
         unsigned long escrito = 0;
         while (escrito < b->usado) {
-            long n = write(b->fd, b->dados + escrito, b->usado - escrito);
+            int64_f n = crock_plat_escrever(b->fd, b->dados + escrito, b->usado - escrito);
             if (n <= 0) break;
             escrito += (unsigned long)n;
         }
@@ -736,6 +736,12 @@ char *txt_copia(char *dest, const char *src, unsigned long tam) {
     return dest;
 }
 
+char *txt_cpy(char *dest, const char *src) {
+    size_t tam = (size_t)txt_tam(src) + 1;
+    memoria_copia(dest, src, tam);
+    return dest;
+}
+
 char *txt_junta(char *dest, const char *src, unsigned long tam) {
     unsigned long tam_dest = 0;
     while (dest[tam_dest] != '\0') tam_dest++;
@@ -810,7 +816,7 @@ double txt_p_flt(const char *str) {
 
 void txt_limpar(void) {
     const char *escape = "\033[0m\033[H\033[2J\033[3J";
-    write(1, escape, txt_tam(escape));
+    crock_plat_escrever(SAIDA_STDOUT, escape, txt_tam(escape));
 }
 
 char *txt_string(const char *formato, ...) {
@@ -830,8 +836,6 @@ char *txt_string(const char *formato, ...) {
     return buffer;
 }
 
-extern long read(int fd, void *buf, unsigned long contagem);
-
 #define ENTRADA_BUF_TAM 256
 
 static char entrada_buf[ENTRADA_BUF_TAM];
@@ -840,7 +844,7 @@ static unsigned long entrada_buf_len = 0;
 
 static int entrada_getchar(void) {
     if (entrada_buf_pos >= entrada_buf_len) {
-        long n = read(0, entrada_buf, ENTRADA_BUF_TAM);
+        int64_f n = crock_plat_ler(0, entrada_buf, ENTRADA_BUF_TAM);
         if (n <= 0) return -1;
             entrada_buf_len = (unsigned long)n;
         entrada_buf_pos = 0;
@@ -929,14 +933,6 @@ double entrada_float64(void) {
     return entrada_float();
 }
 
-extern int  open(const char *caminho, int flags, ...);
-extern int  close(int fd);
-
-#define ARQ_O_RDONLY 0
-#define ARQ_O_WRONLY 1
-#define ARQ_O_CREAT  0100
-#define ARQ_O_TRUNC  01000
-
 char *arquivo_ler_tudo(const char *caminho) {
     if (caminho == NULL) { crock_falha(CROCK_ERRO_NULO); return NULL; }
     size_t capacidade = 4096;
@@ -944,15 +940,15 @@ char *arquivo_ler_tudo(const char *caminho) {
     char *conteudo = (char *)memoria_malloc(capacidade);
     if (conteudo == NULL) return NULL;
 
-    int fd = open(caminho, ARQ_O_RDONLY);
+    int fd = crock_plat_abrir_leitura(caminho);
     if (fd < 0) { memoria_free(conteudo); crock_falha(CROCK_ERRO_ARQUIVO); return NULL; }
 
-    char buf[4096];
-    long n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+    char buf[65536];
+    int64_f n;
+    while ((n = crock_plat_ler(fd, buf, sizeof(buf))) > 0) {
         size_t lido = (size_t)n;
         if (lido > (size_t)-1 - tamanho - 1) {
-            close(fd); memoria_free(conteudo); crock_falha(CROCK_ERRO_TAM_INVALIDO); return NULL;
+            crock_plat_fechar(fd); memoria_free(conteudo); crock_falha(CROCK_ERRO_TAM_INVALIDO); return NULL;
         }
         size_t necessario = tamanho + lido + 1;
         if (necessario > capacidade) {
@@ -962,7 +958,7 @@ char *arquivo_ler_tudo(const char *caminho) {
                 nova *= 2;
             }
             char *novo = (char *)memoria_realloc(conteudo, nova);
-            if (novo == NULL) { close(fd); memoria_free(conteudo); return NULL; }
+            if (novo == NULL) { crock_plat_fechar(fd); memoria_free(conteudo); return NULL; }
             conteudo = novo;
             capacidade = nova;
         }
@@ -970,7 +966,7 @@ char *arquivo_ler_tudo(const char *caminho) {
         tamanho += lido;
     }
 
-    close(fd);
+    crock_plat_fechar(fd);
     if (n < 0) { memoria_free(conteudo); crock_falha(CROCK_ERRO_ARQUIVO); return NULL; }
     conteudo[tamanho] = '\0';
     return conteudo;
@@ -979,26 +975,26 @@ char *arquivo_ler_tudo(const char *caminho) {
 int arquivo_escrever_tudo(const char *caminho, const char *conteudo) {
     CROCK_EXIGIR(caminho != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(conteudo != NULL, CROCK_ERRO_NULO, -1);
-    int fd = open(caminho, ARQ_O_WRONLY | ARQ_O_CREAT | ARQ_O_TRUNC, 0644);
+    int fd = crock_plat_abrir_escrita(caminho);
     if (fd < 0) return crock_falha(CROCK_ERRO_ARQUIVO);
 
     size_t tam = txt_tam(conteudo);
     size_t escrito = 0;
     while (escrito < tam) {
-        long n = write(fd, conteudo + escrito, tam - escrito);
-        if (n <= 0) { close(fd); return crock_falha(CROCK_ERRO_ARQUIVO); }
+        int64_f n = crock_plat_escrever(fd, conteudo + escrito, tam - escrito);
+        if (n <= 0) { crock_plat_fechar(fd); return crock_falha(CROCK_ERRO_ARQUIVO); }
             escrito += (size_t)n;
     }
 
-    close(fd);
+    crock_plat_fechar(fd);
     return 0;
 }
 
 int arquivo_existe(const char *caminho) {
     CROCK_EXIGIR(caminho != NULL, CROCK_ERRO_NULO, 0);
-    int fd = open(caminho, ARQ_O_RDONLY);
+    int fd = crock_plat_abrir_leitura(caminho);
     if (fd < 0) return 0;
-    close(fd);
+    crock_plat_fechar(fd);
     return 1;
 }
 
@@ -1027,7 +1023,7 @@ static int memoria_escreve_bruto(int fd, const void *dados, size_t tam) {
     const char *p = (const char *)dados;
     size_t escrito = 0;
     while (escrito < tam) {
-        long n = write(fd, p + escrito, tam - escrito);
+        int64_f n = crock_plat_escrever(fd, p + escrito, tam - escrito);
         if (n <= 0) return 0;
         escrito += (size_t)n;
     }
@@ -1065,7 +1061,7 @@ static int memoria_le_bin(int fd, void *dest, size_t tam) {
         char *p = (char *)dest;
         size_t lido = 0;
         while (lido < tam) {
-            long n = read(fd, p + lido, tam - lido);
+            int64_f n = crock_plat_ler(fd, p + lido, tam - lido);
             if (n <= 0) return 0;
             lido += (size_t)n;
         }
@@ -1074,7 +1070,7 @@ static int memoria_le_bin(int fd, void *dest, size_t tam) {
     char *p = (char *)dest;
     while (tam > 0) {
         if (memoria_reader.pos == memoria_reader.tamanho) {
-            long n = read(fd, memoria_reader.dados, MEMORIA_IO_BUF_TAM);
+            int64_f n = crock_plat_ler(fd, memoria_reader.dados, MEMORIA_IO_BUF_TAM);
             if (n <= 0) return 0;
             memoria_reader.pos = 0;
             memoria_reader.tamanho = (size_t)n;
@@ -1092,7 +1088,7 @@ static int memoria_le_bin(int fd, void *dest, size_t tam) {
 int memoria_salva(const char *caminho, const char *formato, ...) {
     CROCK_EXIGIR(caminho != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(formato != NULL, CROCK_ERRO_NULO, -1);
-    int fd = open(caminho, ARQ_O_WRONLY | ARQ_O_CREAT | ARQ_O_TRUNC, 0644);
+    int fd = crock_plat_abrir_escrita(caminho);
     if (fd < 0) return crock_falha(CROCK_ERRO_ARQUIVO);
     memoria_writer.fd = fd;
     memoria_writer.usado = 0;
@@ -1158,14 +1154,14 @@ int memoria_salva(const char *caminho, const char *formato, ...) {
     va_fim(args);
     ok = ok && memoria_flush_writer();
     memoria_writer_ativo = 0;
-    close(fd);
+    crock_plat_fechar(fd);
     return ok ? 0 : -1;
 }
 
 int memoria_load(const char *caminho, const char *formato, ...) {
     CROCK_EXIGIR(caminho != NULL, CROCK_ERRO_NULO, -1);
     CROCK_EXIGIR(formato != NULL, CROCK_ERRO_NULO, -1);
-    int fd = open(caminho, ARQ_O_RDONLY);
+    int fd = crock_plat_abrir_leitura(caminho);
     if (fd < 0) return crock_falha(CROCK_ERRO_ARQUIVO);
     memoria_reader.fd = fd;
     memoria_reader.pos = 0;
@@ -1177,19 +1173,19 @@ int memoria_load(const char *caminho, const char *formato, ...) {
         magia[0] != MEMORIA_SALVA_MAGIA[0] || magia[1] != MEMORIA_SALVA_MAGIA[1] ||
         magia[2] != MEMORIA_SALVA_MAGIA[2] || magia[3] != MEMORIA_SALVA_MAGIA[3]) {
         memoria_reader_ativo = 0;
-        close(fd);
+        crock_plat_fechar(fd);
     return -1;
         }
 
         uint32_f tam_formato_salvo = 0;
-        if (!memoria_le_bin(fd, &tam_formato_salvo, sizeof(tam_formato_salvo))) { memoria_reader_ativo = 0; close(fd); return -1; }
+        if (!memoria_le_bin(fd, &tam_formato_salvo, sizeof(tam_formato_salvo))) { memoria_reader_ativo = 0; crock_plat_fechar(fd); return -1; }
 
         char formato_salvo[64];
-        if (tam_formato_salvo >= sizeof(formato_salvo)) { memoria_reader_ativo = 0; close(fd); return -1; }
-        if (!memoria_le_bin(fd, formato_salvo, tam_formato_salvo)) { memoria_reader_ativo = 0; close(fd); return -1; }
+        if (tam_formato_salvo >= sizeof(formato_salvo)) { memoria_reader_ativo = 0; crock_plat_fechar(fd); return -1; }
+        if (!memoria_le_bin(fd, formato_salvo, tam_formato_salvo)) { memoria_reader_ativo = 0; crock_plat_fechar(fd); return -1; }
         formato_salvo[tam_formato_salvo] = '\0';
 
-        if (txt_comp(formato_salvo, formato) != 0) { memoria_reader_ativo = 0; close(fd); return crock_falha(CROCK_ERRO_FORMATO); }
+        if (txt_comp(formato_salvo, formato) != 0) { memoria_reader_ativo = 0; crock_plat_fechar(fd); return crock_falha(CROCK_ERRO_FORMATO); }
 
             va_lista args;
             va_inicio(args, formato);
@@ -1260,24 +1256,12 @@ int memoria_load(const char *caminho, const char *formato, ...) {
 
             va_fim(args);
             memoria_reader_ativo = 0;
-            close(fd);
+            crock_plat_fechar(fd);
             return ok ? 0 : -1;
 }
 
-struct crock_timespec {
-    int64_f tv_sec;
-    int64_f tv_nsec;
-};
-
-#define CROCK_CLOCK_MONOTONO 1
-
-extern int clock_gettime(int clk_id, struct crock_timespec *tp);
-extern int nanosleep(const struct crock_timespec *pedido, struct crock_timespec *restante);
-
 int64_f timer_relogio_ns(void) {
-    struct crock_timespec ts;
-    if (clock_gettime(CROCK_CLOCK_MONOTONO, &ts) != 0) return 0;
-    return (int64_f)ts.tv_sec * 1000000000LL + (int64_f)ts.tv_nsec;
+    return crock_plat_relogio_ns();
 }
 
 Timer timer_iniciar(void) {
@@ -1309,14 +1293,7 @@ double timer_s(Timer *t) {
 }
 
 void timer_dormir_ns(int64_f ns) {
-    if (ns <= 0) return;
-    struct crock_timespec pedido;
-    pedido.tv_sec  = ns / 1000000000LL;
-    pedido.tv_nsec = ns % 1000000000LL;
-    struct crock_timespec restante;
-    while (nanosleep(&pedido, &restante) != 0) {
-        pedido = restante;
-    }
+    crock_plat_dormir_ns(ns);
 }
 
 void timer_dormir_ms(int64_f ms) {

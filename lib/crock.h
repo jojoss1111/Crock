@@ -19,7 +19,14 @@ typedef __UINT16_TYPE__  uint16_f;
 typedef __UINT32_TYPE__  uint32_f;
 typedef __UINT64_TYPE__  uint64_f;
 
+// acompanha o tamanho nativo de ponteiros da plataforma
+#if defined(_WIN64)
+typedef unsigned long long size_t;
+#elif defined(_WIN32)
 typedef unsigned long size_t;
+#else
+typedef __SIZE_TYPE__ size_t;
+#endif
 
 #define HEAP_SIZE 1048576
 
@@ -97,8 +104,6 @@ void  vetor_limpar(Vetor *v);
 // libera o vetor
 void  vetor_liberar(Vetor *v);
 
-extern long write(int fd, const void *buf, unsigned long contagem);
-
 #define SAIDA_STDOUT 1
 #define SAIDA_STDERR 2
 
@@ -127,6 +132,8 @@ void saida_fmt_fd(int fd, const char *formato, ...);
 int    txt_fmt(char *dest, unsigned long tam, const char *formato, ...);
 // copia uma string
 char  *txt_copia(char *dest, const char *src, unsigned long tam);
+// copia uma string para um destino com espaço suficiente
+char  *txt_cpy(char *dest, const char *src);
 // concatena uma string
 char  *txt_junta(char *dest, const char *src, unsigned long tam);
 // compara duas strings
