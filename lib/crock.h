@@ -115,6 +115,8 @@ void saida_flush_tudo(void);
 void saida_char_fd(int fd, char c);
 // escreve uma string num fd
 void saida_str_fd(int fd, const char *s);
+// escreve uma string num fd e descarrega o buffer
+void saida_txt_fd(int fd, const char *s);
 // escreve um inteiro sem sinal num fd, numa base qualquer
 void saida_uint_fd(int fd, uint64_f valor, int base, int maiusculo);
 // escreve um inteiro com sinal num fd
@@ -124,9 +126,20 @@ void saida_float_fd(int fd, double valor, int casas);
 // escreve um texto formatado num fd
 void saida_fmt_fd(int fd, const char *formato, ...);
 
-#define saida_txt(...)    do { saida_fmt_fd(SAIDA_STDOUT, __VA_ARGS__); saida_flush(SAIDA_STDOUT); } while (0)
-#define saida_txt_ln(...) do { saida_fmt_fd(SAIDA_STDOUT, __VA_ARGS__); saida_char_fd(SAIDA_STDOUT, '\n'); saida_flush(SAIDA_STDOUT); } while (0)
-#define saida_erro(...)   do { saida_fmt_fd(SAIDA_STDERR, __VA_ARGS__); saida_flush(SAIDA_STDERR); } while (0)
+void crock_saida_txt_1(const char *s);
+void crock_saida_txt_fmt(const char *formato, ...);
+void crock_saida_txt_ln_1(const char *s);
+void crock_saida_txt_ln_fmt(const char *formato, ...);
+void crock_saida_erro_1(const char *s);
+void crock_saida_erro_fmt(const char *formato, ...);
+
+#define CROCK_ESCOLHE_SAIDA(_1, _2, _3, _4, _5, _6, _7, _8, NOME, ...) NOME
+#define saida_txt(...) \
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_1)(__VA_ARGS__)
+#define saida_txt_ln(...) \
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_1)(__VA_ARGS__)
+#define saida_erro(...) \
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_1)(__VA_ARGS__)
 
 // formata um texto num buffer (tipo snprintf)
 int    txt_fmt(char *dest, unsigned long tam, const char *formato, ...);
@@ -172,6 +185,10 @@ typedef char bool;
 
 // lê o conteúdo inteiro de um arquivo
 char *arquivo_ler_tudo(const char *caminho);
+// lê o conteúdo inteiro de um arquivo, devolvendo o tamanho real lido em
+// tam_out -- use esta versão para arquivos binários que podem conter
+// bytes nulos no meio (ex: PNG), já que txt_tam() pararia no primeiro \0
+char *arquivo_ler_tudo_tam(const char *caminho, size_t *tam_out);
 // escreve um conteúdo inteiro num arquivo
 int    arquivo_escrever_tudo(const char *caminho, const char *conteudo);
 // diz se um arquivo existe
@@ -207,23 +224,6 @@ double  timer_s(Timer *t);
 void    timer_dormir_ns(int64_f ns);
 // pausa a execução por um tempo em milissegundos
 void    timer_dormir_ms(int64_f ms);
-
-// timer com prazo definido, baseado no relógio monotônico
-typedef struct {
-    float   tempo_max_s;
-    int64_f inicio_ns;
-} Temporizador;
-
-// inicia um temporizador com um prazo (em segundos)
-void temporizador_iniciar(Temporizador *t, float tempo_max_s);
-// reinicia a contagem do temporizador (mantém o prazo configurado)
-void temporizador_resetar(Temporizador *t);
-// retorna o tempo decorrido em segundos
-float temporizador_decorrido(const Temporizador *t);
-// diz se o prazo já passou
-bool temporizador_passou(Temporizador *t);
-// diz se o prazo ainda não passou
-bool temporizador_nao_passou(Temporizador *t);
 
 // define a semente do gerador de números aleatórios
 void     random_seed(uint64_f semente);
