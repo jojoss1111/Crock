@@ -54,6 +54,19 @@ crock_plat_memoria_reservar:
     xor rax, rax
     ret
 
+global crock_plat_memoria_decommit
+crock_plat_memoria_decommit:
+    mov rdx, 4
+    mov rax, 28
+    syscall
+    ret
+
+global crock_plat_memoria_liberar
+crock_plat_memoria_liberar:
+    mov rax, 11
+    syscall
+    ret
+
 global crock_plat_relogio_ns
 crock_plat_relogio_ns:
     sub rsp, 24
@@ -100,5 +113,5 @@ crock_plat_dormir_ns:
     add rsp, 40
 .sleep_fim:
     ret
-; Parabens, pode ter lido isso aqui kkk
+;Parabéns, pode ter lido isso aqui kkk
 section .note.GNU-stack noalloc noexec nowrite progbits

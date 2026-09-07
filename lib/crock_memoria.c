@@ -9,6 +9,7 @@ struct block {
     struct block *free_next;
     struct block *free_prev;
     struct arena *dono;
+    size_t reservado;
 };
 
 #define CROCK_BLOCO_MAGIA_OK    0xC20C0001u
@@ -18,18 +19,29 @@ struct block {
 #define CROCK_SMALL_BINS (CROCK_SMALL_BIN_LIMIT / 8)
 #define CROCK_CLASSES 192
 
+#define CROCK_MMAP_DIRETO_LIMITE (256 * 1024)
+#define CROCK_PAGINA_TAM 4096
+
 struct arena {
     char *base;
     size_t tamanho;
 };
 
+static struct arena *arena_primeira = NULL;
+
 static struct block *free_bins[CROCK_CLASSES];
+
+static void memoria_decommitar_intervalo(void *inicio, void *fim) {
+    size_t ini = ((size_t)inicio + CROCK_PAGINA_TAM - 1) & ~(size_t)(CROCK_PAGINA_TAM - 1);
+    size_t fv  = (size_t)fim & ~(size_t)(CROCK_PAGINA_TAM - 1);
+    if (fv > ini) crock_plat_memoria_decommit((void *)ini, fv - ini);
+}
 
 static int free_bin(size_t tam) {
     if (tam <= CROCK_SMALL_BIN_LIMIT) return (int)((tam + 7) / 8) - 1;
 
 #if defined(__GNUC__) || defined(__clang__)
-    int expoente = (int)(sizeof(size_t) * 8 - 1 - __builtin_clzl((unsigned long)tam));
+    int expoente = (int)(sizeof(size_t) * 8 - 1 - __builtin_clzll((unsigned long long)tam));
 #else
     int expoente = 0;
     while (tam > 1) { tam >>= 1; expoente++; }
@@ -92,7 +104,7 @@ static struct arena *nova_arena(size_t tam_min) {
 }
 
 void init_heap(void) {
-    nova_arena(0);
+    arena_primeira = nova_arena(0);
     heap_initialized = 1;
 }
 
@@ -143,12 +155,35 @@ static struct block *malloc_na_arena(size_t tam) {
     return NULL;
 }
 
+static void *memoria_malloc_direto(size_t tam_alinhado) {
+    size_t total = sizeof(struct block) + tam_alinhado;
+    if (total < tam_alinhado) return crock_falha_ptr(CROCK_ERRO_TAM_INVALIDO);
+    size_t reservar = (total + CROCK_PAGINA_TAM - 1) & ~(size_t)(CROCK_PAGINA_TAM - 1);
+
+    void *mem = crock_plat_memoria_reservar(reservar);
+    if (mem == NULL) return crock_falha_ptr(CROCK_ERRO_MEMORIA);
+
+    struct block *b = (struct block *)mem;
+    b->size = tam_alinhado;
+    b->free = 0;
+    b->magia = CROCK_BLOCO_MAGIA_OK;
+    b->next = NULL;
+    b->prev = NULL;
+    b->free_next = NULL;
+    b->free_prev = NULL;
+    b->dono = NULL;
+    b->reservado = reservar;
+    return (void *)((char *)b + sizeof(struct block));
+}
+
 void *memoria_malloc(size_t tam) {
     if (!heap_initialized) init_heap();
     if (tam == 0) return crock_falha_ptr(CROCK_ERRO_TAM_INVALIDO);
     if (tam > (size_t)-1 - 7) return crock_falha_ptr(CROCK_ERRO_TAM_INVALIDO);
 
     tam = (tam + 7) & ~(size_t)7;
+
+    if (tam >= CROCK_MMAP_DIRETO_LIMITE) return memoria_malloc_direto(tam);
 
     struct block *b = malloc_na_arena(tam);
     if (b == NULL) {
@@ -185,6 +220,11 @@ void memoria_free(void *ptr) {
         return;
     }
 
+    if (bloco->dono == NULL) {
+        crock_plat_memoria_liberar(bloco, bloco->reservado);
+        return;
+    }
+
 #ifdef CROCK_DEBUG
     unsigned char *lixo = (unsigned char *)ptr;
     static const unsigned char padrao[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
@@ -194,6 +234,8 @@ void memoria_free(void *ptr) {
     bloco->free = 1;
     bloco->magia = CROCK_BLOCO_MAGIA_LIVRE;
 
+    struct arena *a = bloco->dono;
+
     if (bloco->next != NULL && bloco->next->free) {
         free_list_remove(bloco->next);
         bloco->size += sizeof(struct block) + bloco->next->size;
@@ -201,15 +243,27 @@ void memoria_free(void *ptr) {
         if (bloco->next != NULL) bloco->next->prev = bloco;
     }
 
+    struct block *final = bloco;
     if (bloco->prev != NULL && bloco->prev->free) {
         free_list_remove(bloco->prev);
         bloco->prev->size += sizeof(struct block) + bloco->size;
         bloco->prev->next = bloco->next;
         if (bloco->next != NULL) bloco->next->prev = bloco->prev;
-        free_list_add(bloco->prev);
-    } else {
-        free_list_add(bloco);
+        final = bloco->prev;
     }
+
+    if (a != arena_primeira && final->prev == NULL && final->next == NULL &&
+        final->size == a->tamanho - sizeof(struct arena) - sizeof(struct block)) {
+        crock_plat_memoria_liberar(a, a->tamanho);
+        return;
+    }
+
+#ifndef CROCK_DEBUG
+    memoria_decommitar_intervalo((char *)final + sizeof(struct block),
+                                  (char *)final + sizeof(struct block) + final->size);
+#endif
+
+    free_list_add(final);
 }
 
 void *memoria_realloc(void *ptr, size_t novo_tam) {
@@ -221,6 +275,29 @@ void *memoria_realloc(void *ptr, size_t novo_tam) {
         return crock_falha_ptr(CROCK_ERRO_USE_AFTER_FREE);
     }
     size_t alinhado = (novo_tam + 7) & ~(size_t)7;
+
+    if (bloco->dono == NULL) {
+        if (sizeof(struct block) + alinhado <= bloco->reservado) {
+            bloco->size = alinhado;
+            return ptr;
+        }
+        void *novo = memoria_malloc(novo_tam);
+        if (novo == NULL) return NULL;
+        size_t copiar = bloco->size < alinhado ? bloco->size : alinhado;
+        memoria_copia(novo, ptr, copiar);
+        crock_plat_memoria_liberar(bloco, bloco->reservado);
+        return novo;
+    }
+
+    if (alinhado >= CROCK_MMAP_DIRETO_LIMITE) {
+        void *novo = memoria_malloc_direto(alinhado);
+        if (novo == NULL) return NULL;
+        size_t copiar = bloco->size < alinhado ? bloco->size : alinhado;
+        memoria_copia(novo, ptr, copiar);
+        memoria_free(ptr);
+        return novo;
+    }
+
     if (bloco->size >= alinhado) return ptr;
 
     struct arena *a = bloco->dono;

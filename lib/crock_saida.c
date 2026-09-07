@@ -4,18 +4,63 @@
 #define SAIDA_BUF_TAM 1024
 #endif
 
+#if SAIDA_BUF_TAM <= 0
+
+void saida_flush(int fd) {
+    (void)fd;
+}
+
+void saida_flush_tudo(void) {
+}
+
+void saida_char_fd(int fd, char c) {
+    crock_plat_escrever(fd, &c, 1);
+}
+
+void crock_saida_n_fd(int fd, const char *s, size_t n) {
+    while (n > 0) {
+        int64_f escrito = crock_plat_escrever(fd, s, n);
+        if (escrito <= 0) break;
+        s += escrito;
+        n -= (size_t)escrito;
+    }
+}
+
+void saida_str_fd(int fd, const char *s) {
+    if (!s) return;
+    const char *inicio = s;
+    while (*s != '\0') s++;
+    crock_saida_n_fd(fd, inicio, (size_t)(s - inicio));
+}
+
+void saida_txt_fd(int fd, const char *s) {
+    saida_str_fd(fd, s);
+}
+
+void crock_saida_txt_1(const char *s) {
+    saida_txt_fd(SAIDA_STDOUT, s);
+}
+
+void crock_saida_txt_ln_1(const char *s) {
+    saida_str_fd(SAIDA_STDOUT, s);
+    saida_char_fd(SAIDA_STDOUT, '\n');
+}
+
+void crock_saida_erro_1(const char *s) {
+    saida_txt_fd(SAIDA_STDERR, s);
+}
+
+#else
+
 typedef struct {
-    int fd;
     unsigned long usado;
     char dados[SAIDA_BUF_TAM];
 } SaidaBuffer;
 
-static SaidaBuffer saida_buf_stdout = { SAIDA_STDOUT, 0, {0} };
-static SaidaBuffer saida_buf_stderr = { SAIDA_STDERR, 0, {0} };
+static SaidaBuffer saida_buf;
+static int saida_buf_fd;
 
-static SaidaBuffer *saida_buffer_de(int fd) {
-    return (fd == SAIDA_STDERR) ? &saida_buf_stderr : &saida_buf_stdout;
-}
+static SaidaBuffer *saida_buffer_de(int fd);
 
 static void saida_copia(char *destino, const char *origem, size_t tam) {
     for (size_t i = 0; i < tam; i++) destino[i] = origem[i];
@@ -33,11 +78,12 @@ static void saida_move(char *destino, const char *origem, size_t tam) {
 }
 
 void saida_flush(int fd) {
-    SaidaBuffer *b = saida_buffer_de(fd);
+    SaidaBuffer *b = &saida_buf;
+    if (saida_buf_fd != fd) return;
     if (b->usado > 0) {
         unsigned long escrito = 0;
         while (escrito < b->usado) {
-            int64_f n = crock_plat_escrever(b->fd, b->dados + escrito, b->usado - escrito);
+            int64_f n = crock_plat_escrever(fd, b->dados + escrito, b->usado - escrito);
             if (n <= 0) break;
             escrito += (unsigned long)n;
         }
@@ -49,8 +95,13 @@ void saida_flush(int fd) {
 }
 
 void saida_flush_tudo(void) {
-    saida_flush(SAIDA_STDOUT);
-    saida_flush(SAIDA_STDERR);
+    saida_flush(saida_buf_fd);
+}
+
+static SaidaBuffer *saida_buffer_de(int fd) {
+    if (saida_buf.usado > 0 && saida_buf_fd != fd) saida_flush(saida_buf_fd);
+    saida_buf_fd = fd;
+    return &saida_buf;
 }
 
 void saida_char_fd(int fd, char c) {
@@ -97,3 +148,5 @@ void crock_saida_txt_ln_1(const char *s) {
 void crock_saida_erro_1(const char *s) {
     saida_txt_fd(SAIDA_STDERR, s);
 }
+
+#endif

@@ -28,8 +28,17 @@ static int crock_win_fd_de_handle(HANDLE h) {
     return -1;
 }
 
-void *crock_plat_memoria_reservar(unsigned long tam) {
+void *crock_plat_memoria_reservar(size_t tam) {
     return VirtualAlloc(NULL, tam, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+}
+
+void crock_plat_memoria_liberar(void *mem, size_t tam) {
+    (void)tam;
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+void crock_plat_memoria_decommit(void *mem, size_t tam) {
+    VirtualAlloc(mem, tam, MEM_RESET, PAGE_READWRITE);
 }
 
 int64_f crock_plat_escrever(int fd, const void *buf, size_t tam) {
