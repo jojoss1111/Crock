@@ -66,7 +66,29 @@ void  memoria_free(void *ptr);
 // realoca um bloco de memória
 void *memoria_realloc(void *ptr, size_t novo_tam);
 #define memoria_tam(x) sizeof(x)
+// checa se um bloco alocado ainda está íntegro (redzones intactos).
+// retorna 1 = ok, 0 = corrompido, -1 = ponteiro inválido/já liberado
+int memoria_checar(void *ptr);
+// varre todos os blocos vivos do heap; retorna quantos estão corrompidos
+int memoria_checar_tudo(void);
+// contadores de diagnóstico de malloc_na_arena (tudo 0 se a lib não foi
+// compilada com -DCROCK_STATS). Útil pra achar gargalo real de alocação
+// antes de otimizar às cegas.
+void crock_memoria_stats(uint64_f *chamadas, uint64_f *bins_visitados,
+                          uint64_f *nos_visitados, uint64_f *novas_arenas);
+#ifdef CROCK_RASTREAR_ALOCACOES
+// aloca com rastreio de arquivo/linha (usadas internamente pelas macros abaixo)
+void *crock_memoria_malloc_rastreado(size_t tam, const char *arquivo, int linha);
+void *crock_memoria_calloc_rastreado(size_t qtd, size_t tam_item, const char *arquivo, int linha);
+// varre os blocos vivos e imprime em stderr os que nunca foram liberados
+// (arquivo:linha de onde vieram). Retorna a quantidade de vazamentos.
+int   crock_memoria_relatorio_vazamentos(void);
 
+#ifndef CROCK_MEMORIA_IMPLEMENTACAO
+#define memoria_malloc(tam)         crock_memoria_malloc_rastreado((tam), __FILE__, __LINE__)
+#define memoria_calloc(qtd, tam_i)  crock_memoria_calloc_rastreado((qtd), (tam_i), __FILE__, __LINE__)
+#endif
+#endif
 // vetor dinâmico genérico
 typedef struct {
     void *dados;
@@ -132,14 +154,29 @@ void crock_saida_txt_ln_1(const char *s);
 void crock_saida_txt_ln_fmt(const char *formato, ...);
 void crock_saida_erro_1(const char *s);
 void crock_saida_erro_fmt(const char *formato, ...);
+// Macro seletora configurada para até 16 argumentos
+#define CROCK_ESCOLHE_SAIDA(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, NOME, ...) NOME
 
-#define CROCK_ESCOLHE_SAIDA(_1, _2, _3, _4, _5, _6, _7, _8, NOME, ...) NOME
 #define saida_txt(...) \
-    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_1)(__VA_ARGS__)
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, \
+        crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, \
+        crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, \
+        crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, \
+        crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_fmt, crock_saida_txt_1)(__VA_ARGS__)
+
 #define saida_txt_ln(...) \
-    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_1)(__VA_ARGS__)
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, \
+        crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, \
+        crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, \
+        crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, \
+        crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_fmt, crock_saida_txt_ln_1)(__VA_ARGS__)
+
 #define saida_erro(...) \
-    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_1)(__VA_ARGS__)
+    CROCK_ESCOLHE_SAIDA(__VA_ARGS__, \
+        crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, \
+        crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, \
+        crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, \
+        crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_fmt, crock_saida_erro_1)(__VA_ARGS__)
 
 // formata um texto num buffer (tipo snprintf)
 int    txt_fmt(char *dest, unsigned long tam, const char *formato, ...);
