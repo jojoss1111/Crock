@@ -9,6 +9,10 @@ typedef __builtin_va_list va_lista;
 #define va_prox(v, tipo)     __builtin_va_arg(v, tipo)
 #define va_dup(d, s)         __builtin_va_copy(d, s)
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern void    *crock_plat_memoria_reservar(size_t tam);
 extern void     crock_plat_memoria_liberar(void *mem, size_t tam);
 extern void     crock_plat_memoria_decommit(void *mem, size_t tam);
@@ -22,9 +26,8 @@ extern void     crock_plat_dormir_ns(int64_f ns);
 
 int   crock_falha(CrockErro e);
 void *crock_falha_ptr(CrockErro e);
-
-#define CROCK_EXIGIR(cond, erro, retorno) \
-    do { if (!(cond)) { crock_falha(erro); return (retorno); } } while (0)
+void crock_lock(void);
+void crock_unlock(void);
 
 void memoria_mover(void *destino, const void *origem, size_t tam);
 
@@ -43,5 +46,12 @@ void escritor_uint(CrockEscritor *e, uint64_f valor, int base, int maiusculo);
 void escritor_int(CrockEscritor *e, int64_f valor);
 void escritor_float(CrockEscritor *e, double valor, int casas);
 void escritor_vfmt(CrockEscritor *e, const char *formato, va_lista args);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#define CROCK_EXIGIR(cond, erro, retorno) \
+    do { if (!(cond)) { crock_falha(erro); return (retorno); } } while (0)
 
 #endif

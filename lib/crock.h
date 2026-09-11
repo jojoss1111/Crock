@@ -2,7 +2,11 @@
 #define LIB_H
 
 #ifndef NULL
+#ifdef __cplusplus
+#define NULL nullptr
+#else
 #define NULL ((void*)0)
+#endif
 #endif
 
 #ifdef __cplusplus
@@ -65,7 +69,6 @@ void *memoria_calloc(size_t qtd, size_t tam_item);
 void  memoria_free(void *ptr);
 // realoca um bloco de memória
 void *memoria_realloc(void *ptr, size_t novo_tam);
-#define memoria_tam(x) sizeof(x)
 // checa se um bloco alocado ainda está íntegro (redzones intactos).
 // retorna 1 = ok, 0 = corrompido, -1 = ponteiro inválido/já liberado
 int memoria_checar(void *ptr);
